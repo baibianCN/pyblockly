@@ -764,6 +764,7 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
 
     <!-- ============ 初始化工作区 & 交互脚本 ============ -->
     <script>
+        /* ---- 1. 初始化工作区 ---- */
         var demoWorkspace = Blockly.inject('blocklyDiv', {
             toolbox: document.getElementById('toolbox'),
             grid: { spacing: 20, length: 2, snap: true, colour: '#e5e5e5' },
@@ -772,6 +773,17 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             theme: Blockly.Themes.Classic,
             renderer: 'zelos'
         });
+
+        // ================= ★ 修复：变量赋值空槽显示 None 的 Bug ★ =================
+        if (Blockly.Python) {
+            Blockly.Python['variables_set'] = function(block) {
+                // 把原本的 || 'None' 改成 || '0'
+                var argument0 = Blockly.Python.valueToCode(block, 'VALUE', Blockly.Python.ORDER_NONE) || '0';
+                var varName = Blockly.Python.variableDB_.getName(block.getFieldValue('VAR'), Blockly.Variables.NAME_TYPE);
+                return varName + ' = ' + argument0 + '\n';
+            };
+        }
+        // =========================================================================
 
         var PLACEHOLDER = "# 请在左侧拖拽积木生成 Python 代码...";
 
@@ -783,6 +795,7 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         }
         demoWorkspace.addChangeListener(updateCode);
 
+        /* ---- 2. 复制 / 下载 ---- */
         function copyCode() {
             var codeText = document.getElementById('codeDiv').innerText;
             navigator.clipboard.writeText(codeText).then(function () {
@@ -801,6 +814,7 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             a.click(); URL.revokeObjectURL(url);
         }
 
+        /* ---- 3. 运行控制台 ---- */
         var consoleStarted = false;
 
         function consoleLog(msg) {
@@ -815,6 +829,7 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             consoleStarted = true;
         }
 
+        /* ---- 4. 浏览器内运行 Python（Pyodide） ---- */
         var PYODIDE_BASE = 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/';
         var pyodideInstance = null;
         var pyodideLoading = null;
@@ -865,7 +880,7 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
                             return (v === null || v === undefined) ? '' : v;
                         }
                     });
-                } catch (e) { }
+                } catch (e) { /* 忽略 */ }
 
                 consoleLog('# ─── 开始运行 ───');
                 await py.runPythonAsync(code);
@@ -878,6 +893,7 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             }
         }
 
+        /* ---- 5. 发送邮箱验证码 ---- */
         function sendCode() {
             var email = document.getElementById('email-input').value.trim();
             var errorMsg = document.getElementById('error-msg');
@@ -916,6 +932,7 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             xhr.send('action=send_code&email=' + encodeURIComponent(email));
         }
 
+        /* ---- 6. 校验邮箱验证码 ---- */
         function verifyCode() {
             var email = document.getElementById('email-input').value.trim();
             var code  = document.getElementById('code-input').value.trim();
@@ -953,6 +970,7 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             xhr.send('action=verify_code&email=' + encodeURIComponent(email) + '&code=' + encodeURIComponent(code));
         }
 
+        /* ---- 7. 退出授权 ---- */
         function logoutAuth() {
             if (!confirm('确定要退出授权吗？退出后需要重新验证。')) return;
             var xhr = new XMLHttpRequest();
