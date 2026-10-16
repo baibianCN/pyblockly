@@ -1,15 +1,82 @@
 <?php
 // ============================================================
-//  index.php  —  Python 可视化积木编辑器
-//  让 Python 像搭积木一样简单
+//  index.php  —  PyBlockly
+//  Python like building blocks.
 //  作者：baibian
+//  开发：Gemini & DeepSeek 双模型协作
 // ============================================================
-//  使用前请修改：$owner 与 $repo 为你自己的 GitHub 用户名 / 仓库名
-//  暗语后门：BAIBIAN（可在下方修改）
+//  验证方式：邮箱验证码（QQ邮箱 SMTP 发送）
+//  使用前必须修改下方的 SMTP 配置
 // ============================================================
 
 ob_start();
 session_start();
+
+/* ============================================================
+   SMTP 配置（★ 使用前必须修改 ★）
+   ------------------------------------------------------------
+   $SMTP_USER : 你的完整 QQ 邮箱地址，如 123456@qq.com
+   $SMTP_PASS : QQ邮箱生成的 16 位 SMTP 授权码（不是QQ密码）
+                获取：QQ邮箱网页版 → 设置 → 账户
+                     → 开启 IMAP/SMTP 服务 → 生成授权码
+   ============================================================ */
+$SMTP_HOST = 'smtp.qq.com';
+$SMTP_PORT = 465;
+$SMTP_USER = 'your_qq@qq.com';       // ★ 改成你的QQ邮箱
+$SMTP_PASS = 'your_smtp_password';   // ★ 改成你的16位授权码
+$SMTP_FROM = 'your_qq@qq.com';       // ★ 改成你的QQ邮箱
+$SMTP_NAME = 'PyBlockly';
+
+/* ============ 简易 SMTP 发信函数（QQ邮箱 465 SSL） ============ */
+function smtp_send($host, $port, $user, $pass, $from, $fromName, $to, $subject, $body) {
+    $fp = @stream_socket_client("ssl://{$host}:{$port}", $errno, $errstr, 15);
+    if (!$fp) return "连接失败: {$errstr} ({$errno})";
+
+    stream_set_timeout($fp, 15);
+    $read = function () use ($fp) {
+        $data = '';
+        while ($line = fgets($fp, 515)) {
+            $data .= $line;
+            if (isset($line[3]) && $line[3] === ' ') break;
+        }
+        return $data;
+    };
+    $send = function ($cmd) use ($fp) { fwrite($fp, $cmd . "\r\n"); };
+
+    $read();
+    $send("EHLO " . ($_SERVER['HTTP_HOST'] ?? 'localhost'));
+    $read();
+    $send("AUTH LOGIN");
+    $read();
+    $send(base64_encode($user));
+    $read();
+    $send(base64_encode($pass));
+    $authResp = $read();
+    if (strpos($authResp, '235') === false) { fclose($fp); return "认证失败: " . trim($authResp); }
+
+    $send("MAIL FROM: <{$from}>");
+    $read();
+    $send("RCPT TO: <{$to}>");
+    $read();
+    $send("DATA");
+    $read();
+
+    $headers  = "From: =?UTF-8?B?" . base64_encode($fromName) . "?= <{$from}>\r\n";
+    $headers .= "To: <{$to}>\r\n";
+    $headers .= "Subject: =?UTF-8?B?" . base64_encode($subject) . "?=\r\n";
+    $headers .= "MIME-Version: 1.0\r\n";
+    $headers .= "Content-Type: text/plain; charset=UTF-8\r\n";
+    $headers .= "Content-Transfer-Encoding: base64\r\n";
+    $headers .= "\r\n";
+    $headers .= chunk_split(base64_encode($body));
+
+    fwrite($fp, $headers . "\r\n.\r\n");
+    $dataResp = $read();
+    $send("QUIT");
+    fclose($fp);
+
+    return (strpos($dataResp, '250') !== false) ? true : "发送失败: " . trim($dataResp);
+}
 
 $isAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
 $action = $_POST['action'] ?? '';
@@ -28,62 +95,69 @@ if ($isAjax && $action === 'logout') {
     exit;
 }
 
-/* ============ 校验 Star ============ */
-if ($isAjax && $action === 'check_star') {
+/* ============ 发送邮箱验证码 ============ */
+if ($isAjax && $action === 'send_code') {
     ob_clean();
     header('Content-Type: application/json; charset=utf-8');
 
-    if (isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true) {
-        echo json_encode(['status' => 'success']);
+    $email = trim($_POST['email'] ?? '');
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        echo json_encode(['status' => 'error', 'message' => '邮箱格式不正确']);
         exit;
     }
 
-    $username = trim($_POST['username'] ?? '');
-    if (empty($username)) {
-        echo json_encode(['status' => 'error', 'message' => '请输入 GitHub 用户名或暗语']);
+    if (isset($_SESSION['email_code_time']) && time() - $_SESSION['email_code_time'] < 60) {
+        $left = 60 - (time() - $_SESSION['email_code_time']);
+        echo json_encode(['status' => 'error', 'message' => "请 {$left} 秒后再试"]);
         exit;
     }
 
-    // 🔑 暗语后门
-    if ($username === 'BAIBIAN') {
-        $_SESSION['is_starred'] = true;
-        echo json_encode(['status' => 'success']);
-        exit;
-    }
+    $code = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+    $_SESSION['email_code']      = $code;
+    $_SESSION['email_code_time'] = time();
+    $_SESSION['email_code_addr'] = $email;
 
-    // ==========================================
-    // ★★★ 请在此处修改为你的 GitHub 用户名与仓库名 ★★★
-    $owner = "你的GitHub用户名";
-    $repo  = "你的仓库名";
-    // ==========================================
+    $subject = "PyBlockly 邮箱验证码";
+    $body    = "您的验证码是：{$code}\n\n5 分钟内有效，请勿泄露给他人。\n\n—— PyBlockly 作者 baibian";
 
-    $url = "https://api.github.com/repos/{$owner}/{$repo}/stargazers?per_page=100";
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
-    // 如需 Token 提速（可选）：
-    // curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: token 你的GitHubToken']);
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
+    $result = smtp_send($SMTP_HOST, $SMTP_PORT, $SMTP_USER, $SMTP_PASS, $SMTP_FROM, $SMTP_NAME, $email, $subject, $body);
 
-    if ($httpCode === 200) {
-        $stargazers = json_decode($response, true);
-        $hasStarred = false;
-        if (is_array($stargazers)) {
-            foreach ($stargazers as $user) {
-                if (strcasecmp($user['login'], $username) === 0) { $hasStarred = true; break; }
-            }
-        }
-        if ($hasStarred) {
-            $_SESSION['is_starred'] = true;
-            echo json_encode(['status' => 'success']);
-        } else {
-            echo json_encode(['status' => 'not_starred', 'message' => '未检测到该用户给仓库点 Star，请确认后重试！']);
-        }
+    if ($result === true) {
+        echo json_encode(['status' => 'success', 'message' => '验证码已发送，请查收邮箱']);
     } else {
-        echo json_encode(['status' => 'error', 'message' => 'GitHub API 校验失败，请检查配置或稍后再试']);
+        echo json_encode(['status' => 'error', 'message' => '邮件发送失败：' . $result]);
     }
+    exit;
+}
+
+/* ============ 校验邮箱验证码 ============ */
+if ($isAjax && $action === 'verify_code') {
+    ob_clean();
+    header('Content-Type: application/json; charset=utf-8');
+
+    $email = trim($_POST['email'] ?? '');
+    $code  = trim($_POST['code'] ?? '');
+
+    if (!isset($_SESSION['email_code'], $_SESSION['email_code_time'], $_SESSION['email_code_addr'])) {
+        echo json_encode(['status' => 'error', 'message' => '请先获取验证码']);
+        exit;
+    }
+    if (time() - $_SESSION['email_code_time'] > 300) {
+        echo json_encode(['status' => 'error', 'message' => '验证码已过期，请重新获取']);
+        exit;
+    }
+    if (strcasecmp($email, $_SESSION['email_code_addr']) !== 0) {
+        echo json_encode(['status' => 'error', 'message' => '邮箱与发送时不一致']);
+        exit;
+    }
+    if ($code !== $_SESSION['email_code']) {
+        echo json_encode(['status' => 'error', 'message' => '验证码错误']);
+        exit;
+    }
+
+    $_SESSION['is_starred'] = true;
+    unset($_SESSION['email_code'], $_SESSION['email_code_time'], $_SESSION['email_code_addr']);
+    echo json_encode(['status' => 'success']);
     exit;
 }
 
@@ -95,11 +169,10 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>让 Python 像搭积木一样简单</title>
+    <title>PyBlockly — 让 Python 像搭积木一样简单</title>
     <meta name="author" content="baibian">
-    <meta name="description" content="Python 可视化积木编辑器 — 让 Python 像搭积木一样简单">
+    <meta name="description" content="PyBlockly — Python like building blocks. 基于 Blockly + Pyodide 的可视化 Python 积木编辑器。">
 
-    <!-- Blockly 核心 + Python 生成器 -->
     <script src="https://unpkg.com/blockly@10.4.3/blockly.min.js"></script>
     <script src="https://unpkg.com/blockly@10.4.3/python_compressed.js"></script>
 
@@ -107,7 +180,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body, html { width: 100%; height: 100%; overflow: hidden; background: #ffffff; font-family: monospace, sans-serif; color: #000000; }
 
-        /* ===== 验证弹窗 ===== */
         #star-modal {
             position: fixed; inset: 0; background: rgba(255, 255, 255, 0.95);
             display: <?php echo $isStarred ? 'none' : 'flex'; ?>; justify-content: center; align-items: center; z-index: 9999;
@@ -125,8 +197,8 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             transition: background .1s, color .1s;
         }
         .btn-square:hover { background: #fff; color: #000; }
+        .btn-square:disabled { opacity: .5; cursor: not-allowed; }
 
-        /* ===== 顶部导航 ===== */
         header {
             height: 50px; display: flex; justify-content: space-between; align-items: center; padding: 0 20px;
             background: #fff; border-bottom: 2px solid #000; z-index: 10;
@@ -143,11 +215,9 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         }
         .logout-btn:hover { background: #000; color: #fff; }
 
-        /* ===== 工作区 ===== */
         .workspace { display: flex; width: 100%; height: calc(100vh - 50px); }
         #blocklyDiv { flex: 1 1 0%; height: 100%; position: relative; overflow: hidden; background: #ffffff !important; }
 
-        /* ===== 右侧代码面板 ===== */
         .code-panel {
             width: 460px; height: 100%; background: #fff; border-left: 2px solid #000;
             display: flex; flex-direction: column;
@@ -174,7 +244,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             background: #fafafa;
         }
 
-        /* ===== 运行控制台 ===== */
         .console-panel { flex: 0 0 230px; min-height: 130px; display: flex; flex-direction: column;
             border-top: 2px solid #000; background: #fff; }
         .console-toolbar {
@@ -187,7 +256,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             line-height: 1.55; white-space: pre-wrap; overflow-y: auto; background: #fff; color: #000;
         }
 
-        /* ===== Blockly 左侧分类栏 ===== */
         .blocklyToolboxDiv {
             width: 122px !important;
             background: #ffffff !important;
@@ -209,7 +277,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         .blocklyTreeLabel { font-family: monospace !important; font-size: 12px !important; }
         .blocklyTreeIcon { display: none !important; }
 
-        /* ===== Blockly 右键菜单 ===== */
         .blocklyMenu, .goog-menu {
             background: #ffffff !important;
             border: 2px solid #000000 !important;
@@ -240,7 +307,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         }
         .blocklyMenuItemContent { font-family: monospace !important; }
 
-        /* ===== Blockly 右侧图标 ===== */
         .blocklyZoom, .blocklyTrash {
             pointer-events: auto !important;
             opacity: 1 !important;
@@ -254,18 +320,15 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         .blocklyZoom > image:hover, .blocklyTrash > image:hover { opacity: 1 !important; }
         .blocklyZoomReset { cursor: pointer !important; }
 
-        /* ===== Blockly 滚动条 ===== */
         .blocklyScrollbarHandle { fill: #000000 !important; opacity: .55 !important; }
         .blocklyScrollbarHandle:hover { opacity: .85 !important; }
 
-        /* ===== Blockly 提示浮层 ===== */
         .blocklyTooltipDiv {
             background: #ffffff !important; border: 2px solid #000000 !important; border-radius: 0 !important;
             box-shadow: 4px 4px 0 #000000 !important; color: #000000 !important;
             font-family: monospace !important; font-size: 12px !important; padding: 6px 10px !important;
         }
 
-        /* ===== Blockly 输入框 ===== */
         .blocklyHtmlInput {
             font-family: monospace !important; font-size: 12px !important;
             border: 2px solid #000000 !important; border-radius: 0 !important;
@@ -274,26 +337,23 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
 </head>
 <body>
 
-    <!-- 验证弹窗 -->
+    <!-- 邮箱验证弹窗 -->
     <div id="star-modal">
         <div class="modal-card">
-            <div class="modal-title">访问授权验证</div>
+            <div class="modal-title">邮箱验证</div>
             <div class="modal-desc">
-                请先前往 GitHub 仓库点亮 Star 获得使用权限，或直接输入专用暗语解锁。
+                请输入邮箱获取验证码，验证通过后即可使用编辑器。
             </div>
-            <a href="https://github.com/你的GitHub用户名/你的仓库名" target="_blank"
-               style="display:block;font-size:12px;color:#000;text-decoration:underline;margin-bottom:16px;font-weight:bold;">
-                [+] 打开 GitHub 仓库地址
-            </a>
-            <input type="text" id="github-username" class="form-input" placeholder="请输入 GitHub 用户名或暗语">
-            <button onclick="verifyStar()" id="verify-btn" class="btn-square">验证并进入</button>
+            <input type="email" id="email-input" class="form-input" placeholder="请输入邮箱地址">
+            <button onclick="sendCode()" id="send-btn" class="btn-square" style="margin-bottom:10px;">发送验证码</button>
+            <input type="text" id="code-input" class="form-input" placeholder="请输入 6 位验证码" maxlength="6">
+            <button onclick="verifyCode()" id="verify-btn" class="btn-square">验证并进入</button>
             <div id="error-msg" style="color:#ff0000;font-size:11px;margin-top:10px;min-height:16px;font-weight:bold;"></div>
         </div>
     </div>
 
-    <!-- 顶部导航 -->
     <header>
-        <div class="brand">让 Python 像搭积木一样简单 <small>Python Visual Block Editor</small></div>
+        <div class="brand">让 Python 像搭积木一样简单 <small>PyBlockly — Python like building blocks.</small></div>
         <div class="header-right">
             <span class="author">作者：baibian</span>
             <?php if ($isStarred): ?>
@@ -302,7 +362,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         </div>
     </header>
 
-    <!-- 主工作区 -->
     <div class="workspace">
         <div id="blocklyDiv"></div>
 
@@ -329,7 +388,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
 
     <!-- ============ 满满当当的 Python 积木工具箱 ============ -->
     <xml id="toolbox" style="display: none">
-
         <category name="逻辑" colour="#000000">
             <block type="controls_if"></block>
             <block type="logic_compare"></block>
@@ -339,7 +397,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             <block type="logic_null"></block>
             <block type="logic_ternary"></block>
         </category>
-
         <category name="循环" colour="#222222">
             <block type="controls_repeat_ext">
                 <value name="TIMES"><shadow type="math_number"><field name="NUM">10</field></shadow></value>
@@ -353,7 +410,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             <block type="controls_forEach"></block>
             <block type="controls_flow_statements"></block>
         </category>
-
         <category name="数学" colour="#333333">
             <block type="math_number"><field name="NUM">0</field></block>
             <block type="math_arithmetic"></block>
@@ -383,7 +439,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
                 <value name="Y"><shadow type="math_number"><field name="NUM">1</field></shadow></value>
             </block>
         </category>
-
         <category name="文本" colour="#555555">
             <block type="text"></block>
             <block type="text_join"></block>
@@ -419,7 +474,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
                 <value name="TEXT"><shadow type="text"><field name="TEXT">请输入内容</field></shadow></value>
             </block>
         </category>
-
         <category name="列表" colour="#666666">
             <block type="lists_create_empty"></block>
             <block type="lists_create_with"></block>
@@ -454,7 +508,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
                 <value name="LIST"><block type="variables_get"><field name="VAR">list</field></block></value>
             </block>
         </category>
-
         <category name="颜色" colour="#888888">
             <block type="colour_picker"></block>
             <block type="colour_random"></block>
@@ -469,12 +522,9 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
                 <value name="RATIO"><shadow type="math_number"><field name="NUM">0.5</field></shadow></value>
             </block>
         </category>
-
         <sep></sep>
-
         <category name="变量" colour="#111111" custom="VARIABLE"></category>
         <category name="函数" colour="#444444" custom="PROCEDURE"></category>
-
     </xml>
 
     <!-- ============ 中文语言包（必须在 inject 之前执行）============ -->
@@ -484,7 +534,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         if (!Blockly.Msg) Blockly.Msg = {};
         var M = Blockly.Msg;
 
-        /* ---- 右键菜单 / 通用操作 ---- */
         M.ADD_COMMENT = '添加注释';
         M.REMOVE_COMMENT = '删除注释';
         M.DUPLICATE_BLOCK = '复制积木';
@@ -511,7 +560,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         M.BLOCK_DELETED = '已删除积木。';
         M.BLOCKS_DELETED = '已删除 %1 个积木。';
 
-        /* ---- 变量 ---- */
         M.RENAME_VARIABLE = '重命名变量...';
         M.DELETE_VARIABLE = '删除变量 "%1"';
         M.DELETE_VARIABLE_CONFIRM = '删除 %2 处对变量 "%1" 的引用？';
@@ -523,7 +571,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         M.VARIABLES_SET = '将 %1 设为 %2';
         M.VARIABLES_SET_TITLE = '赋值';
 
-        /* ---- 函数 ---- */
         M.PROCEDURES_DEFNORETURN_TITLE = '定义';
         M.PROCEDURES_DEFNORETURN_PROCEDURE = '函数名';
         M.PROCEDURES_DEFNORETURN_DO = '执行';
@@ -543,7 +590,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         M.PROCEDURES_CALL_BEFORE_PARAMS = '参数：';
         M.PROCEDURES_CREATE_DO = '创建 "%1" 调用';
 
-        /* ---- 条件 ---- */
         M.CONTROLS_IF_MSG_IF = '如果';
         M.CONTROLS_IF_MSG_THEN = '那么';
         M.CONTROLS_IF_MSG_ELSE = '否则';
@@ -556,7 +602,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         M.CONTROLS_IF_TOOLTIP_3 = '若第一条件为真执行第一块；否则若第二条件为真执行第二块。';
         M.CONTROLS_IF_TOOLTIP_4 = '多条件分支执行。';
 
-        /* ---- 循环 ---- */
         M.CONTROLS_REPEAT_TITLE = '重复 %1 次';
         M.CONTROLS_REPEAT_INPUT_DO = '执行';
         M.CONTROLS_REPEAT_TOOLTIP = '重复执行若干次。';
@@ -576,7 +621,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         M.CONTROLS_FLOW_STATEMENTS_TOOLTIP_CONTINUE = '跳过本次迭代，进入下一次。';
         M.CONTROLS_FLOW_STATEMENTS_WARNING = '警告：此积木只能在循环中使用。';
 
-        /* ---- 逻辑 ---- */
         M.LOGIC_COMPARE_TOOLTIP_EQ = '两值相等则返回真。';
         M.LOGIC_COMPARE_TOOLTIP_NEQ = '两值不等则返回真。';
         M.LOGIC_COMPARE_TOOLTIP_LT = '左值小于右值则返回真。';
@@ -593,7 +637,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         M.LOGIC_TERNARY_IF_TRUE = '若为真';
         M.LOGIC_TERNARY_IF_FALSE = '若为假';
 
-        /* ---- 数学 ---- */
         M.MATH_ARITHMETIC_TOOLTIP_ADD = '返回两数之和。';
         M.MATH_ARITHMETIC_TOOLTIP_MINUS = '返回两数之差。';
         M.MATH_ARITHMETIC_TOOLTIP_MULTIPLY = '返回两数之积。';
@@ -638,7 +681,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         M.MATH_RANDOM_FLOAT_TITLE_RANDOM = '随机小数';
         M.MATH_ATAN2_TITLE = '点 (%1, %2) 的反正切';
 
-        /* ---- 文本 ---- */
         M.TEXT_JOIN_TITLE_CREATEWITH = '拼接文本';
         M.TEXT_CREATE_JOIN_TITLE_JOIN = '连接';
         M.TEXT_APPEND_TITLE = '向 %1 追加文本 %2';
@@ -670,7 +712,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         M.TEXT_PROMPT_TYPE_TEXT = '弹出输入框（文本）';
         M.TEXT_PROMPT_TYPE_NUMBER = '弹出输入框（数字）';
 
-        /* ---- 列表 ---- */
         M.LISTS_CREATE_EMPTY_TITLE = '创建空列表';
         M.LISTS_CREATE_WITH_INPUT_WITH = '创建列表，包含';
         M.LISTS_CREATE_WITH_CONTAINER_TITLE_ADD = '列表';
@@ -707,7 +748,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         M.LISTS_SPLIT_WITH_DELIMITER = '使用分隔符';
         M.LISTS_REVERSE_MESSAGE0 = '反转 %1';
 
-        /* ---- 颜色 ---- */
         M.COLOUR_PICKER_TOOLTIP = '从调色板中选取颜色。';
         M.COLOUR_RANDOM_TITLE = '随机颜色';
         M.COLOUR_RANDOM_TOOLTIP = '随机生成一个颜色。';
@@ -724,7 +764,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
 
     <!-- ============ 初始化工作区 & 交互脚本 ============ -->
     <script>
-        /* ---- 1. 初始化工作区 ---- */
         var demoWorkspace = Blockly.inject('blocklyDiv', {
             toolbox: document.getElementById('toolbox'),
             grid: { spacing: 20, length: 2, snap: true, colour: '#e5e5e5' },
@@ -744,7 +783,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
         }
         demoWorkspace.addChangeListener(updateCode);
 
-        /* ---- 2. 复制 / 下载 ---- */
         function copyCode() {
             var codeText = document.getElementById('codeDiv').innerText;
             navigator.clipboard.writeText(codeText).then(function () {
@@ -763,7 +801,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             a.click(); URL.revokeObjectURL(url);
         }
 
-        /* ---- 3. 运行控制台 ---- */
         var consoleStarted = false;
 
         function consoleLog(msg) {
@@ -778,7 +815,6 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             consoleStarted = true;
         }
 
-        /* ---- 4. 浏览器内运行 Python（Pyodide） ---- */
         var PYODIDE_BASE = 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/';
         var pyodideInstance = null;
         var pyodideLoading = null;
@@ -829,7 +865,7 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
                             return (v === null || v === undefined) ? '' : v;
                         }
                     });
-                } catch (e) { /* 忽略 */ }
+                } catch (e) { }
 
                 consoleLog('# ─── 开始运行 ───');
                 await py.runPythonAsync(code);
@@ -842,17 +878,17 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
             }
         }
 
-        /* ---- 5. Star 验证 ---- */
-        function verifyStar() {
-            var username = document.getElementById('github-username').value.trim();
+        function sendCode() {
+            var email = document.getElementById('email-input').value.trim();
             var errorMsg = document.getElementById('error-msg');
-            var btn = document.getElementById('verify-btn');
+            var btn = document.getElementById('send-btn');
 
-            if (!username) { errorMsg.innerText = "错误：输入不能为空。"; return; }
+            if (!email) { errorMsg.innerText = "请先填写邮箱。"; return; }
 
             errorMsg.innerText = "";
-            btn.innerText = "正在验证...";
             btn.disabled = true;
+            var oldText = btn.innerText;
+            btn.innerText = "发送中...";
 
             var xhr = new XMLHttpRequest();
             xhr.open('POST', '', true);
@@ -861,8 +897,46 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
 
             xhr.onreadystatechange = function () {
                 if (xhr.readyState === 4) {
-                    btn.innerText = "验证并进入";
                     btn.disabled = false;
+                    btn.innerText = oldText;
+                    if (xhr.status === 200) {
+                        try {
+                            var res = JSON.parse(xhr.responseText);
+                            if (res.status === 'success') {
+                                errorMsg.style.color = '#000';
+                                errorMsg.innerText = res.message;
+                            } else {
+                                errorMsg.style.color = '#ff0000';
+                                errorMsg.innerText = res.message;
+                            }
+                        } catch (e) { errorMsg.innerText = "解析响应失败"; }
+                    } else { errorMsg.innerText = "网络请求失败"; }
+                }
+            };
+            xhr.send('action=send_code&email=' + encodeURIComponent(email));
+        }
+
+        function verifyCode() {
+            var email = document.getElementById('email-input').value.trim();
+            var code  = document.getElementById('code-input').value.trim();
+            var errorMsg = document.getElementById('error-msg');
+            var btn = document.getElementById('verify-btn');
+
+            if (!email || !code) { errorMsg.innerText = "请填写邮箱和验证码。"; return; }
+
+            errorMsg.innerText = "";
+            btn.disabled = true;
+            btn.innerText = "验证中...";
+
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '', true);
+            xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === 4) {
+                    btn.disabled = false;
+                    btn.innerText = "验证并进入";
                     if (xhr.status === 200) {
                         try {
                             var res = JSON.parse(xhr.responseText);
@@ -872,35 +946,25 @@ $isStarred = isset($_SESSION['is_starred']) && $_SESSION['is_starred'] === true;
                             } else {
                                 errorMsg.innerText = res.message;
                             }
-                        } catch (e) {
-                            errorMsg.innerText = "错误：解析服务器响应失败。";
-                        }
-                    } else {
-                        errorMsg.innerText = "错误：网络请求失败。";
-                    }
+                        } catch (e) { errorMsg.innerText = "解析响应失败"; }
+                    } else { errorMsg.innerText = "网络请求失败"; }
                 }
             };
-            xhr.send('action=check_star&username=' + encodeURIComponent(username));
+            xhr.send('action=verify_code&email=' + encodeURIComponent(email) + '&code=' + encodeURIComponent(code));
         }
 
-        /* ---- 6. 退出授权 ---- */
         function logoutAuth() {
             if (!confirm('确定要退出授权吗？退出后需要重新验证。')) return;
-
             var xhr = new XMLHttpRequest();
             xhr.open('POST', '', true);
             xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
             xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-
             xhr.onreadystatechange = function () {
                 if (xhr.readyState === 4) {
                     if (xhr.status === 200) {
                         try {
                             var res = JSON.parse(xhr.responseText);
-                            if (res.status === 'success') {
-                                location.reload();
-                                return;
-                            }
+                            if (res.status === 'success') { location.reload(); return; }
                         } catch (e) {}
                     }
                     alert('退出失败，请稍后重试。');
